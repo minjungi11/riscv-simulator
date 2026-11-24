@@ -1,0 +1,5 @@
+expected_stdout.txt text eol=lf
+*.bin binary
+*.out binary
+*.zip binary
+*.pdf binary
