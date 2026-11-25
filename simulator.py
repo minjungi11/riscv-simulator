@@ -44,12 +44,21 @@ def branch_immediate(word: int) -> int:
     raw |= (((word >> 25) & 0x3F) << 5) | (((word >> 8) & 0xF) << 1)
     return signed(raw, 13)
 
+def I_immediate(word: int) -> int:
+    raw = (word >> 20) & 0xFFF
+    return signed(raw, 12)
+
+def U_immediate(word: int) -> int:
+    raw = (word >> 12) & 0xFFFFF
+    return raw << 12
+
 
 def decode(word: int) -> str | None:
     opcode = word & 0x7F
     funct3 = (word >> 12) & 7
+    funct7 = word >> 25 & 0x7F
     if opcode == 0x33:
-        return R_OPS.get((funct3, word >> 25))
+        return R_OPS.get((funct3, funct7))
     if opcode == 0x13:
         return I_OPS.get(funct3)
     if opcode == 0x37:
@@ -89,7 +98,7 @@ def execute(op: str, word: int, pc: int, regs: list[int], data: bytearray) -> in
     rd = (word >> 7) & 31
     left = regs[(word >> 15) & 31]
     right = regs[(word >> 20) & 31]
-    imm_i = signed(word >> 20, 12)
+    imm_i = I_immediate(word)
     next_pc = (pc + 4) & MASK32
 
     if op in ("beq", "bne", "blt", "bge"):
@@ -107,7 +116,7 @@ def execute(op: str, word: int, pc: int, regs: list[int], data: bytearray) -> in
         offset = word_offset(address, DATA_BASE, len(data))
         result = int.from_bytes(data[offset:offset + 4], "little")
     elif op == "lui":
-        result = word & 0xFFFFF000
+        result = U_immediate(word)
     elif op == "add":
         result = left + right
     elif op == "sub":
