@@ -1,0 +1,239 @@
+"""Functional simulator for the project's 14-instruction RV32I subset."""
+
+import sys
+from pathlib import Path
+
+
+TEXT_BASE = 0x00040000
+DATA_BASE = 0x10000000
+SEGMENT_SIZE = 1024
+STEP_LIMIT = 1_000_000
+MASK32 = 0xFFFFFFFF
+
+R_OPS = {(0, 0): "add", (0, 0x20): "sub", (6, 0): "or", (7, 0): "and"}
+I_OPS = {0: "addi", 6: "ori", 7: "andi"}
+BRANCH_OPS = {0: "beq", 1: "bne", 4: "blt", 5: "bge"}
+
+
+class SimulationError(Exception):
+    """An input, address, or execution limit is outside the project model."""
+
+
+def load_segment(path: Path) -> bytes:
+    with path.open("rb") as stream:
+        content = stream.read(SEGMENT_SIZE + 1)
+    if len(content) > SEGMENT_SIZE:
+        raise SimulationError(f"{path}: segment exceeds {SEGMENT_SIZE} bytes")
+    return content
+
+
+def signed(value: int, width: int) -> int:
+    """Interpret an unsigned bit field of the given width as two's complement."""
+    sign_bit = 1 << (width - 1)
+    return (value ^ sign_bit) - sign_bit
+
+
+def store_immediate(word: int) -> int:
+    raw = ((word >> 25) << 5) | ((word >> 7) & 0x1F)
+    return signed(raw, 12)
+
+
+def branch_immediate(word: int) -> int:
+    # B offsets are in bytes. Bit zero is implicit in the instruction.
+    raw = ((word >> 31) << 12) | (((word >> 7) & 1) << 11)
+    raw |= (((word >> 25) & 0x3F) << 5) | (((word >> 8) & 0xF) << 1)
+    return signed(raw, 13)
+
+
+def decode(word: int) -> str | None:
+    opcode = word & 0x7F
+    funct3 = (word >> 12) & 7
+    if opcode == 0x33:
+        return R_OPS.get((funct3, word >> 25))
+    if opcode == 0x13:
+        return I_OPS.get(funct3)
+    if opcode == 0x37:
+        return "lui"
+    if opcode == 0x03 and funct3 == 2:
+        return "lw"
+    if opcode == 0x23 and funct3 == 2:
+        return "sw"
+    if opcode == 0x63:
+        return BRANCH_OPS.get(funct3)
+    return None
+
+
+def word_offset(address: int, base: int, size: int) -> int:
+    offset = address - base
+    if offset % 4 or not 0 <= offset <= size - 4:
+        raise SimulationError(f"unaligned or out-of-range word at 0x{address:08x}")
+    return offset
+
+
+def fetch(text: bytes, pc: int) -> int:
+    offset = word_offset(pc, TEXT_BASE, len(text))
+    return int.from_bytes(text[offset:offset + 4], "little")
+
+
+# 수정한 부분 시작
+# branch작업 처리 함수
+def branch_taken(op: str, rs1: int, rs2: int) -> bool:
+    if op == "beq":
+        return rs1 == rs2
+    if op == "bne":
+        return rs1 != rs2
+    if op == "blt":
+        return signed(rs1, 32) < signed(rs2, 32)
+    if op == "bge":
+        return signed(rs1, 32) >= signed(rs2, 32)  
+    else:
+        raise AssertionError(f"missing execution rule for {op}")
+
+# decode된 명령어 처리 함수
+def execute(op: str, word: int, pc: int, regs: list[int], data: bytearray) -> int:
+    rd = (word >> 7) & 0x1F
+    rs1 = regs[(word >> 15) & 0x1F]
+    rs2 = regs[(word >> 20) & 0x1F]
+    imm_i = signed(word >> 20, 12)
+    next_pc = (pc + 4) & MASK32
+
+    if op in ("beq", "bne", "blt", "bge"):
+        if branch_taken(op, rs1, rs2):
+            return (pc + branch_immediate(word)) & MASK32
+        return next_pc
+    if op == "sw":
+        address = (rs1 + store_immediate(word)) & MASK32
+        offset = word_offset(address, DATA_BASE, len(data))
+        data[offset:offset + 4] = rs2.to_bytes(4, "little")
+        return next_pc
+
+    if op == "lw":
+        address = (rs1 + imm_i) & MASK32
+        offset = word_offset(address, DATA_BASE, len(data))
+        result = int.from_bytes(data[offset:offset + 4], "little")
+    elif op == "lui":
+        result = word & 0xFFFFF000
+    elif op == "add":
+        result = rs1 + rs2
+    elif op == "sub":
+        result = rs1 - rs2
+    elif op == "addi":
+        result = rs1 + imm_i
+    elif op == "and":
+        result = rs1 & rs2
+    elif op == "andi":
+        result = rs1 & imm_i
+    elif op == "or":
+        result = rs1 | rs2
+    elif op == "ori":
+        result = rs1 | imm_i
+    else:
+        raise AssertionError(f"missing execution rule for {op}")
+
+    if rd != 0:
+        regs[rd] = result & MASK32
+    return next_pc
+
+# execute함수 검증용 함수
+def testExecute():
+    rs1_value, rs2_value = map(int, input().split())
+    testPc = 0
+    testRegs = [0] * 32
+    testRegs[19] = DATA_BASE
+    testRegs[20] = rs1_value & MASK32
+    testRegs[21] = rs2_value & MASK32
+    testData = bytearray(SEGMENT_SIZE)
+    
+    rd = 22
+    testWord = 0x015A0B00 #0000000 10101 10100 000 10110 0000000 / Rformat 테스트용, rs1 = x20, rs2 = x21, rd = x22
+    testOp = "add"
+    testPc = execute(testOp, testWord, testPc, testRegs, testData)
+    print(f"add결과| pc: {testPc}, rd: {signed(testRegs[rd], 32)}")
+    testOp = "sub"
+    testPc = execute(testOp, testWord, testPc, testRegs, testData)
+    print(f"sub결과| pc: {testPc}, rd: {signed(testRegs[rd], 32)}")
+    testOp = "and"
+    testPc = execute(testOp, testWord, testPc, testRegs, testData)
+    print(f"and결과| pc: {testPc}, rd: {signed(testRegs[rd], 32)}")
+    testOp = "or"
+    testPc = execute(testOp, testWord, testPc, testRegs, testData)
+    print(f"or결과| pc: {testPc}, rd: {signed(testRegs[rd], 32)}")
+    
+    testWord = 0x001A0B00 #0000 0000 0001 10100 000 10110 0000000 / Iformat, rs1 = x20, rd = x22, immdeiate = 1
+    testOp = "addi"
+    testPc = execute(testOp, testWord, testPc, testRegs, testData)
+    print(f"addi결과| pc: {testPc}, rd: {signed(testRegs[rd], 32)}")
+    testOp = "andi"
+    testPc = execute(testOp, testWord, testPc, testRegs, testData)
+    print(f"andi결과| pc: {testPc}, rd: {signed(testRegs[rd], 32)}")
+    testOp = "ori"
+    testPc = execute(testOp, testWord, testPc, testRegs, testData)
+    print(f"ori결과| pc: {testPc}, rd: {signed(testRegs[rd], 32)}")
+    testWord = 0x01598000 # Sformat-sw테스트용, rs1 = x19, rs2 = x21, immediate = 0, x19를 레지스터 주소로 이용
+    testOp = "sw"
+    testPc = execute(testOp, testWord, testPc, testRegs, testData)
+    testWord = 0x00098B00 # Iformat-lw명령어용, rs1 = x19, rd = x22, immediate = 0, x19를 레지스터 주소로 이용
+    testOp = "lw"
+    testPc = execute(testOp, testWord, testPc, testRegs, testData)
+    print(f"sw후 lw결과| pc: {testPc}, rd: {signed(testRegs[rd], 32)}")
+    testWord = 0x15A0400 # B-format, rs1 = x20, rs2 = x21, immediate = 8
+    testOp = "beq"
+    testPc = execute(testOp, testWord, testPc, testRegs, testData)
+    print(f"beq결과| pc: {testPc}")
+    testOp = "bne"
+    testPc = execute(testOp, testWord, testPc, testRegs, testData)
+    print(f"bne결과| pc: {testPc}")
+    testOp = "blt"
+    testPc = execute(testOp, testWord, testPc, testRegs, testData)
+    print(f"blt결과| pc: {testPc}")
+    testOp = "bge"
+    testPc = execute(testOp, testWord, testPc, testRegs, testData)
+    print(f"bge결과| pc: {testPc}")
+    testWord = 0x00001B00 # U-format, rd = x22, immdeiate = 1
+    testOp = "lui"
+    testPc = execute(testOp, testWord, testPc, testRegs, testData)
+    print(f"lui결과| pc: {testPc}, rd: 0x{testRegs[rd]:08x}")
+    
+# 수정한 부분 끝
+
+
+def simulate(text: bytes, data: bytearray) -> tuple[int, int]:
+    if not text or len(text) % 4:
+        raise SimulationError("text size must be a positive multiple of four")
+    regs = [0] * 32
+    pc = TEXT_BASE
+    executed = 0
+    while True:
+        word = fetch(text, pc)
+        op = decode(word)
+        if op is None:
+            return pc, word
+        if executed == STEP_LIMIT:
+            raise SimulationError(f"instruction limit exceeded at 0x{pc:08x}")
+        pc = execute(op, word, pc, regs, data)
+        executed += 1
+
+
+def main(args: list[str]) -> int:
+    if len(args) != 2:
+        print("usage: simulator.py text.bin data.bin", file=sys.stderr)
+        return 2
+    try:
+        text = load_segment(Path(args[0]))
+        initial_data = load_segment(Path(args[1]))
+        data = bytearray(SEGMENT_SIZE)
+        data[:len(initial_data)] = initial_data
+        pc, word = simulate(text, data)
+        Path("data.out").write_bytes(data)
+        line = f"PC 0x{pc:08x} invalid instruction 0x{word:08x}\n"
+        sys.stdout.buffer.write(line.encode("ascii"))
+    except (OSError, SimulationError) as error:
+        print(error, file=sys.stderr)
+        return 1
+    return 0
+
+# 테스트용 코드 / 아래 코드 주석 해제하여 사용
+testExecute()
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
