@@ -70,6 +70,18 @@ def word_offset(address: int, base: int, size: int) -> int:
     return offset
 
 
+def read_word(data: bytearray, address: int) -> int:
+    """Read an unsigned little-endian word at a data-segment address."""
+    offset = word_offset(address, DATA_BASE, len(data))
+    return int.from_bytes(data[offset:offset + 4], "little")
+
+
+def write_word(data: bytearray, address: int, value: int) -> None:
+    """Write the low 32 bits of value at a data-segment address."""
+    offset = word_offset(address, DATA_BASE, len(data))
+    data[offset:offset + 4] = (value & MASK32).to_bytes(4, "little")
+
+
 def fetch(text: bytes, pc: int) -> int:
     offset = word_offset(pc, TEXT_BASE, len(text))
     return int.from_bytes(text[offset:offset + 4], "little")
